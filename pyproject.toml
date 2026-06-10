@@ -1,0 +1,44 @@
+[project]
+name = "ijepa-mini"
+version = "0.1.0"
+description = "Mini I-JEPA implementation scaffold inspired by facebookresearch/ijepa."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "pillow>=10.0",
+    "pyyaml>=6.0",
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "tqdm>=4.66",
+]
+
+[project.scripts]
+ijepa-mini = "main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
