@@ -1,0 +1,61 @@
+meta:
+  project: ijepa-mini
+  model_name: vit_tiny
+  use_bfloat16: false
+  load_checkpoint: false
+  read_checkpoint: null
+
+model:
+  encoder:
+    image_size: 224
+    patch_size: 16
+    in_channels: 3
+    embed_dim: 192
+    depth: 12
+    num_heads: 3
+    mlp_ratio: 4.0
+    dropout: 0.0
+    use_cls_token: false
+  predictor:
+    embed_dim: 192
+    predictor_embed_dim: 384
+    depth: 6
+    num_heads: 6
+    mlp_ratio: 4.0
+    dropout: 0.0
+
+data:
+  root_path: data
+  image_folder: train
+  image_size: 224
+  batch_size: 32
+  num_workers: 4
+  pin_memory: true
+
+mask:
+  patch_size: 16
+  allow_overlap: false
+  num_context_masks: 1
+  num_target_masks: 4
+  context_scale: [0.85, 1.0]
+  target_scale: [0.15, 0.2]
+  aspect_ratio: [0.75, 1.5]
+
+optimization:
+  epochs: 100
+  warmup_epochs: 10
+  lr: 0.000625
+  start_lr: 0.0002
+  final_lr: 0.000001
+  weight_decay: 0.04
+  final_weight_decay: 0.4
+  ema: [0.996, 1.0]
+
+loss:
+  name: smooth_l1
+  beta: 1.0
+  normalize_targets: true
+
+logging:
+  folder: outputs
+  write_tag: ijepa-mini
