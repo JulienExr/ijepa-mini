@@ -50,6 +50,8 @@ optimization:
   weight_decay: 0.04
   final_weight_decay: 0.4
   ema: [0.996, 1.0]
+  use_amp: true
+  amp_dtype: float16
 
 loss:
   name: smooth_l1
