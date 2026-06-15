@@ -1,29 +1,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from torch import Tensor, nn
-else:
-    Tensor = Any
-
-    class _Module:
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            pass
-
-        def parameters(self) -> list[Any]:
-            return []
-
-    class _NN:
-        Module = _Module
-
-    nn = _NN()
+import torch
+from torch import Tensor, nn
 
 
 @dataclass(frozen=True)
 class PredictorConfig:
     """Configuration for the latent-space predictor."""
+
+    image_size: int = 224
+    patch_size: int = 16
+
+    @property
+    def num_patches(self) -> int:
+        return (self.image_size // self.patch_size) ** 2
 
     embed_dim: int = 192
     predictor_embed_dim: int = 384
@@ -38,10 +31,30 @@ class PredictorBlock(nn.Module):
 
     def __init__(self, config: PredictorConfig) -> None:
         super().__init__()
-        self.config = config
+        dim = config.predictor_embed_dim
+        hidden_dim = int(dim * config.mlp_ratio)
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(
+            dim,
+            config.num_heads,
+            dropout=config.dropout,
+            batch_first=True,
+        )
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(config.dropout),
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(config.dropout),
+        )
 
     def forward(self, tokens: Tensor) -> Tensor:
-        raise NotImplementedError("Predictor block forward is not implemented.")
+        x = self.norm1(tokens)
+        attn_output, _ = self.attn(x, x, x, need_weights=False)
+        x = tokens + attn_output
+        x = x + self.mlp(self.norm2(x))
+        return x
 
 
 class IJEPAPredictor(nn.Module):
@@ -50,6 +63,60 @@ class IJEPAPredictor(nn.Module):
     def __init__(self, config: PredictorConfig) -> None:
         super().__init__()
         self.config = config
+        self.context_proj = nn.Linear(config.embed_dim, config.predictor_embed_dim)
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, config.predictor_embed_dim))
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, config.num_patches, config.predictor_embed_dim)
+        )
+        self.blocks = nn.ModuleList(
+            [PredictorBlock(config) for _ in range(config.depth)]
+        )
+        self.norm = nn.LayerNorm(config.predictor_embed_dim)
+        self.output_proj = nn.Linear(config.predictor_embed_dim, config.embed_dim)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.trunc_normal_(self.mask_token, std=0.02)
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+    def gather_pos_embed(self, masks: list[Tensor]) -> Tensor:
+        if not masks:
+            raise ValueError("masks cannot be empty.")
+
+        pos = []
+        for mask in masks:
+            if mask.ndim != 2:
+                raise ValueError(f"mask must be [B, N], got {tuple(mask.shape)}")
+
+            mask = mask.to(device=self.pos_embed.device, dtype=torch.long)
+            if mask.numel() > 0:
+                min_index = int(mask.min().item())
+                max_index = int(mask.max().item())
+                if min_index < 0 or max_index >= self.config.num_patches:
+                    raise ValueError(
+                        "mask indices must be in "
+                        f"[0, {self.config.num_patches - 1}], got "
+                        f"[{min_index}, {max_index}]"
+                    )
+
+            expanded = mask.unsqueeze(-1).expand(
+                -1,
+                -1,
+                self.config.predictor_embed_dim,
+            )
+            pos_embed = self.pos_embed.expand(mask.size(0), -1, -1)
+            pos.append(pos_embed.gather(1, expanded))
+        return torch.cat(pos, dim=1)
+
+    def add_mask_tokens(
+        self,
+        context_tokens: Tensor,
+        target_masks: list[Tensor],
+    ) -> Tensor:
+        batch_size = context_tokens.size(0)
+        target_pos = self.gather_pos_embed(target_masks)
+        mask_tokens = self.mask_token.expand(batch_size, target_pos.size(1), -1)
+        return mask_tokens + target_pos
 
     def forward(
         self,
@@ -57,10 +124,22 @@ class IJEPAPredictor(nn.Module):
         context_masks: list[Tensor],
         target_masks: list[Tensor],
     ) -> Tensor:
-        raise NotImplementedError("Predictor forward pass is not implemented.")
+        context_tokens = self.context_proj(context_tokens)
 
-    def add_mask_tokens(self, context_tokens: Tensor, target_masks: list[Tensor]) -> Tensor:
-        raise NotImplementedError("Target mask token insertion is not implemented.")
+        context_pos = self.gather_pos_embed(context_masks)
+        context_tokens = context_tokens + context_pos
+
+        target_tokens = self.add_mask_tokens(context_tokens, target_masks)
+
+        tokens = torch.cat([context_tokens, target_tokens], dim=1)
+
+        for block in self.blocks:
+            tokens = block(tokens)
+
+        tokens = self.norm(tokens)
+        target_tokens = tokens[:, context_tokens.size(1):, :]
+        predictions = self.output_proj(target_tokens)
+        return predictions
 
 
 def build_predictor(config: dict[str, Any] | PredictorConfig) -> IJEPAPredictor:
