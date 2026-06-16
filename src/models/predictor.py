@@ -108,13 +108,35 @@ class IJEPAPredictor(nn.Module):
             pos.append(pos_embed.gather(1, expanded))
         return torch.cat(pos, dim=1)
 
+    def gather_context_pos_embed(self, masks: list[Tensor], batch_size: int) -> Tensor:
+        base_batch_size = masks[0].size(0)
+        if batch_size == base_batch_size:
+            return self.gather_pos_embed(masks)
+        if batch_size == base_batch_size * len(masks):
+            return torch.cat([self.gather_pos_embed([mask]) for mask in masks], dim=0)
+        raise ValueError(
+            "context token batch size must match the image batch or "
+            f"image batch * num context masks, got {batch_size}"
+        )
+
+    def gather_target_pos_embed(self, masks: list[Tensor], batch_size: int) -> Tensor:
+        target_pos = self.gather_pos_embed(masks)
+        if batch_size == target_pos.size(0):
+            return target_pos
+        if batch_size % target_pos.size(0) != 0:
+            raise ValueError(
+                "target position batch size is incompatible with context tokens: "
+                f"{target_pos.size(0)} vs {batch_size}"
+            )
+        return target_pos.repeat(batch_size // target_pos.size(0), 1, 1)
+
     def add_mask_tokens(
         self,
         context_tokens: Tensor,
         target_masks: list[Tensor],
     ) -> Tensor:
         batch_size = context_tokens.size(0)
-        target_pos = self.gather_pos_embed(target_masks)
+        target_pos = self.gather_target_pos_embed(target_masks, batch_size)
         mask_tokens = self.mask_token.expand(batch_size, target_pos.size(1), -1)
         return mask_tokens + target_pos
 
@@ -126,7 +148,10 @@ class IJEPAPredictor(nn.Module):
     ) -> Tensor:
         context_tokens = self.context_proj(context_tokens)
 
-        context_pos = self.gather_pos_embed(context_masks)
+        context_pos = self.gather_context_pos_embed(
+            context_masks,
+            context_tokens.size(0),
+        )
         context_tokens = context_tokens + context_pos
 
         target_tokens = self.add_mask_tokens(context_tokens, target_masks)

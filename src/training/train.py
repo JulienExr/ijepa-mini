@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,7 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 from torch.optim import Optimizer
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -54,10 +56,9 @@ class OptimizerFactory:
     def __init__(self, config: TrainingConfig) -> None:
         self.config = config
 
-    def build(self, model: IJEPA) -> tuple[Optimizer, Any, Any]:
+    def build(self, model: IJEPA, steps_per_epoch: int) -> tuple[Optimizer, Any, Any]:
         params = list(model.context_encoder.parameters())
         params += list(model.predictor.parameters())
-        t_max = max(1, self.config.epochs - self.config.warmup_epochs)
 
         optimizer = torch.optim.AdamW(
             params,
@@ -66,14 +67,77 @@ class OptimizerFactory:
             betas=(0.9, 0.95),
         )
 
-        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        total_steps = max(1, self.config.epochs * steps_per_epoch)
+        warmup_steps = max(0, self.config.warmup_epochs * steps_per_epoch)
+        lr_scheduler = LambdaLR(
             optimizer,
-            T_max=t_max,
-            eta_min=self.config.final_lr,
+            lr_lambda=self._build_lr_lambda(total_steps, warmup_steps),
         )
-        wd_scheduler = None
+        wd_scheduler = WeightDecayScheduler(
+            optimizer=optimizer,
+            start=self.config.weight_decay,
+            end=self.config.final_weight_decay,
+            total_steps=total_steps,
+        )
 
         return optimizer, lr_scheduler, wd_scheduler
+
+    def _build_lr_lambda(self, total_steps: int, warmup_steps: int) -> Any:
+        if self.config.lr <= 0:
+            raise ValueError("optimization.lr must be positive")
+
+        start_factor = self.config.start_lr / self.config.lr
+        final_factor = self.config.final_lr / self.config.lr
+
+        def lr_lambda(step: int) -> float:
+            if warmup_steps > 0 and step < warmup_steps:
+                progress = step / warmup_steps
+                return start_factor + (1.0 - start_factor) * progress
+
+            cosine_steps = max(1, total_steps - warmup_steps)
+            progress = min(max(step - warmup_steps, 0), cosine_steps) / cosine_steps
+            cosine = 0.5 * (1.0 + math.cos(progress * math.pi))
+            return final_factor + (1.0 - final_factor) * cosine
+
+        return lr_lambda
+
+
+class WeightDecayScheduler:
+    """Cosine schedule for AdamW weight decay."""
+
+    def __init__(
+        self,
+        optimizer: Optimizer,
+        start: float,
+        end: float,
+        total_steps: int,
+    ) -> None:
+        self.optimizer = optimizer
+        self.start = start
+        self.end = end
+        self.total_steps = max(1, total_steps)
+        self.step_index = 0
+        self._set_weight_decay(start)
+
+    def step(self) -> None:
+        self._set_weight_decay(self._scheduled_value(self.step_index))
+        self.step_index += 1
+
+    def state_dict(self) -> dict[str, int]:
+        return {"step_index": self.step_index}
+
+    def load_state_dict(self, state: dict[str, int]) -> None:
+        self.step_index = int(state["step_index"])
+        self._set_weight_decay(self._scheduled_value(self.step_index))
+
+    def _scheduled_value(self, step: int) -> float:
+        progress = min(step, self.total_steps) / self.total_steps
+        cosine = 0.5 * (1.0 + math.cos(progress * math.pi))
+        return self.end + (self.start - self.end) * cosine
+
+    def _set_weight_decay(self, value: float) -> None:
+        for group in self.optimizer.param_groups:
+            group["weight_decay"] = value
 
 
 class CheckpointManager:
@@ -187,9 +251,10 @@ class IJEPATrainer:
 
         optimization_config = self.config.get("optimization", {})
         training_config = self._build_training_config(optimization_config)
+        steps_per_epoch = self._get_steps_per_epoch()
         self.optimizer, self.lr_scheduler, self.wd_scheduler = OptimizerFactory(
             training_config
-        ).build(self.model)
+        ).build(self.model, steps_per_epoch=steps_per_epoch)
         self.ema_scheduler = self._build_ema_scheduler(
             optimization_config,
             training_config,
@@ -241,12 +306,7 @@ class IJEPATrainer:
         if len(ema) != 2:
             raise ValueError("optimization.ema must contain [start, end].")
 
-        try:
-            steps_per_epoch = len(self.train_loader)
-        except (NotImplementedError, TypeError):
-            steps_per_epoch = 1
-
-        total_steps = max(1, training_config.epochs * steps_per_epoch)
+        total_steps = max(1, training_config.epochs * self._get_steps_per_epoch())
         return EMAScheduler(
             EMAConfig(
                 start=float(ema[0]),
@@ -254,6 +314,10 @@ class IJEPATrainer:
                 total_steps=total_steps,
             )
         )
+
+    def _get_steps_per_epoch(self) -> int:
+        assert self.train_loader is not None
+        return max(1, len(self.train_loader))
 
     def build_model(self) -> IJEPA:
         return build_ijepa(self.config.get("model", {}))
@@ -357,6 +421,9 @@ class IJEPATrainer:
 
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
+
+        if self.wd_scheduler is not None:
+            self.wd_scheduler.step()
 
         if self.ema_scheduler is not None:
             momentum = next(self.ema_scheduler)

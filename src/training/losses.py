@@ -1,21 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    from torch import Tensor, nn
-else:
-    Tensor = Any
-
-    class _Module:
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            pass
-
-    class _NN:
-        Module = _Module
-
-    nn = _NN()
+import torch
+import torch.nn.functional as F
+from torch import Tensor, nn
 
 
 @dataclass(frozen=True)
@@ -35,15 +24,34 @@ class IJEPALoss(nn.Module):
         self.config = config
 
     def forward(self, predictions: Tensor, targets: Tensor) -> Tensor:
-        raise NotImplementedError("I-JEPA loss computation is not implemented.")
+        if predictions.shape != targets.shape:
+            raise ValueError(
+                "predictions and targets must have the same shape, got "
+                f"{tuple(predictions.shape)} and {tuple(targets.shape)}"
+            )
+
+        if self.config.normalize_targets:
+            targets = normalize_targets(targets)
+
+        if self.config.name == "smooth_l1":
+            return smooth_l1_latent_loss(predictions, targets, beta=self.config.beta)
+        if self.config.name == "mse":
+            return F.mse_loss(predictions, targets)
+        raise ValueError(f"Unsupported loss: {self.config.name}")
 
 
 def normalize_targets(targets: Tensor) -> Tensor:
-    raise NotImplementedError("Target normalization is not implemented.")
+    mean = targets.mean(dim=-1, keepdim=True)
+    variance = targets.var(dim=-1, keepdim=True, unbiased=False)
+    return (targets - mean) * torch.rsqrt(variance + 1e-6)
 
 
-def smooth_l1_latent_loss(predictions: Tensor, targets: Tensor, beta: float = 1.0) -> Tensor:
-    raise NotImplementedError("Smooth L1 latent loss is not implemented.")
+def smooth_l1_latent_loss(
+    predictions: Tensor,
+    targets: Tensor,
+    beta: float = 1.0,
+) -> Tensor:
+    return F.smooth_l1_loss(predictions, targets.detach(), beta=beta)
 
 
 def build_loss(config: dict | LossConfig) -> IJEPALoss:

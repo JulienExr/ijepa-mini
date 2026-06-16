@@ -1,26 +1,11 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
-from dataclasses import field
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, field
+from typing import Any
 
-if TYPE_CHECKING:
-    from torch import Tensor, nn
-else:
-    Tensor = Any
-
-    class _Module:
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            pass
-
-        def parameters(self) -> list[Any]:
-            return []
-
-    class _NN:
-        Module = _Module
-
-    nn = _NN()
+import torch
+from torch import Tensor, nn
 
 from src.models.encoder import EncoderConfig, VisionTransformerEncoder
 from src.models.predictor import IJEPAPredictor, PredictorConfig
@@ -55,10 +40,19 @@ class IJEPA(nn.Module):
         context_masks: list[Tensor],
         target_masks: list[Tensor],
     ) -> Tensor:
-        raise NotImplementedError("Context/predictor forward pass is not implemented.")
+        context_tokens = self.context_encoder(images, context_masks)
+        return self.predictor(context_tokens, context_masks, target_masks)
 
     def forward_target(self, images: Tensor, target_masks: list[Tensor]) -> Tensor:
-        raise NotImplementedError("Target encoder forward pass is not implemented.")
+        with torch.no_grad():
+            target_tokens = self.target_encoder(images)
+
+        gathered_targets = []
+        for mask in target_masks:
+            mask = mask.to(device=target_tokens.device, dtype=torch.long)
+            idx = mask.unsqueeze(-1).expand(-1, -1, target_tokens.size(-1))
+            gathered_targets.append(target_tokens.gather(dim=1, index=idx))
+        return torch.cat(gathered_targets, dim=1)
 
     def forward(
         self,
@@ -68,6 +62,13 @@ class IJEPA(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         predictions = self.forward_context(images, context_masks, target_masks)
         targets = self.forward_target(images, target_masks)
+        if predictions.size(0) != targets.size(0):
+            if predictions.size(0) % targets.size(0) != 0:
+                raise ValueError(
+                    "Prediction and target batch sizes are incompatible: "
+                    f"{predictions.size(0)} vs {targets.size(0)}"
+                )
+            targets = targets.repeat(predictions.size(0) // targets.size(0), 1, 1)
         return predictions, targets
 
 
@@ -75,6 +76,11 @@ def build_ijepa(config: dict[str, Any] | IJEPAConfig) -> IJEPA:
     """Factory for the full I-JEPA model."""
     if isinstance(config, dict):
         encoder_config = EncoderConfig(**config.get("encoder", {}))
-        predictor_config = PredictorConfig(**config.get("predictor", {}))
+        predictor_kwargs = {
+            "image_size": encoder_config.image_size,
+            "patch_size": encoder_config.patch_size,
+            **config.get("predictor", {}),
+        }
+        predictor_config = PredictorConfig(**predictor_kwargs)
         config = IJEPAConfig(encoder=encoder_config, predictor=predictor_config)
     return IJEPA(config)
