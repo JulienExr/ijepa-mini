@@ -1,3 +1,6 @@
+# Local learning app (not part of the project)
+learning-app/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

@@ -1,19 +1,11 @@
 from __future__ import annotations
 
+import copy
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterator
 
-if TYPE_CHECKING:
-    from torch import nn
-else:
-    class _Module:
-        def parameters(self) -> list[Any]:
-            return []
-
-    class _NN:
-        Module = _Module
-
-    nn = _NN()
+import torch
+import torch.nn as nn
 
 
 @dataclass(frozen=True)
@@ -36,7 +28,12 @@ class EMAScheduler:
         return self
 
     def __next__(self) -> float:
-        raise NotImplementedError("EMA momentum scheduling is not implemented.")
+        total = max(self.config.total_steps, 1)
+        t = min(self.step_index, self.config.total_steps)
+        span = self.config.end - self.config.start
+        momentum = self.config.start + span * (t / total)
+        self.step_index += 1
+        return momentum
 
     def state_dict(self) -> dict[str, int]:
         return {"step_index": self.step_index}
@@ -45,11 +42,17 @@ class EMAScheduler:
         self.step_index = state["step_index"]
 
 
+@torch.no_grad()
 def update_ema(source: nn.Module, target: nn.Module, momentum: float) -> None:
     """Update target encoder parameters from context encoder parameters."""
-    raise NotImplementedError("EMA parameter update is not implemented.")
+    for p_src, p_tgt in zip(source.parameters(), target.parameters(), strict=True):
+        p_tgt.mul_(momentum).add_(p_src.detach(), alpha=1.0 - momentum)
 
 
 def copy_model_for_ema(model: nn.Module) -> nn.Module:
     """Create a frozen target model initialized from a source model."""
-    raise NotImplementedError("EMA target model copy is not implemented.")
+    target = copy.deepcopy(model)
+    for parameter in target.parameters():
+        parameter.requires_grad = False
+    target.eval()
+    return target
