@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ class LinearProbeConfig:
     lr: float = 0.1
     weight_decay: float = 0.0
     batch_size: int = 256
+    output_dir: str | None = None
 
 
 class LinearClassifier(nn.Module):
@@ -89,11 +91,13 @@ class LinearProbeEvaluator:
         encoder.load_state_dict(encoder_state, strict=False)
         return encoder
 
-    def train(self) -> None:
+    def train(self) -> dict[str, float]:
         assert self.probe_config is not None
+        metrics: dict[str, float] = {}
         for epoch in range(self.probe_config.epochs):
             metrics = self.train_epoch(epoch)
             tqdm.write(f"Linear probe epoch {epoch}: {metrics}")
+        return metrics
 
     def train_epoch(self, epoch: int) -> dict[str, float]:
         assert self.encoder is not None
@@ -152,6 +156,38 @@ class LinearProbeEvaluator:
         tqdm.write(f"Linear probe eval: {metrics}")
         return metrics
 
+    def write_metrics(
+        self,
+        train_metrics: dict[str, float],
+        eval_metrics: dict[str, float],
+    ) -> None:
+        assert self.probe_config is not None
+        if self.probe_config.output_dir is None:
+            return
+
+        assert self.train_loader is not None
+        assert self.val_loader is not None
+        output_dir = Path(self.probe_config.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        metrics = {
+            "model": "ijepa_encoder",
+            "checkpoint_path": self.probe_config.checkpoint_path,
+            "dataset": str(Path(self.config.get("data", {}).get("root_path", "data"))),
+            "num_classes": self.probe_config.num_classes,
+            "train_images": len(self.train_loader.dataset),
+            "val_images": len(self.val_loader.dataset),
+            "linear_epochs": self.probe_config.epochs,
+            "linear_lr": self.probe_config.lr,
+            "linear_batch_size": self.probe_config.batch_size,
+            "linear_train_loss": train_metrics.get("loss"),
+            "linear_train": train_metrics.get("accuracy"),
+            "linear_val": eval_metrics.get("accuracy"),
+        }
+        (output_dir / "metrics.json").write_text(
+            json.dumps(metrics, indent=2),
+            encoding="utf-8",
+        )
+
     def _build_probe_config(self) -> LinearProbeConfig:
         raw = self.config.get("evaluation", {}).get(
             "linear_probe",
@@ -193,5 +229,6 @@ def main(config: dict[str, Any]) -> None:
     """Run linear probing evaluation."""
     evaluator = LinearProbeEvaluator(config)
     evaluator.setup()
-    evaluator.train()
-    evaluator.evaluate()
+    train_metrics = evaluator.train()
+    eval_metrics = evaluator.evaluate()
+    evaluator.write_metrics(train_metrics, eval_metrics)

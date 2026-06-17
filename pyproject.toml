@@ -5,6 +5,9 @@ description = "Mini I-JEPA implementation scaffold inspired by facebookresearch/
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "datasets>=3.0",
+    "huggingface-hub>=1.19.0",
+    "kagglehub>=0.3",
     "numpy>=1.24",
     "opencv-python>=4.8",
     "pillow>=10.0",

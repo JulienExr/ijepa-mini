@@ -42,12 +42,79 @@ class CheckpointConfig:
     folder: str = "outputs"
     write_tag: str = "ijepa-mini"
     save_every_epochs: int = 1
+    run_name: str | None = None
+    checkpoint_subdir: str | None = None
     load_checkpoint: bool = False
     read_checkpoint: str | None = None
+    save_optimizer: bool = True
+    save_schedulers: bool = True
+    save_scaler: bool = True
+    keep_last_n: int | None = None
 
     @property
     def output_dir(self) -> Path:
-        return Path(self.folder)
+        output_dir = Path(self.folder)
+        if self.run_name:
+            output_dir = output_dir / self.run_name
+            if self.checkpoint_subdir:
+                output_dir = output_dir / self.checkpoint_subdir
+        return output_dir
+
+
+@dataclass(frozen=True)
+class EarlyStoppingConfig:
+    """Stop training when a monitored metric stops improving."""
+
+    enabled: bool = False
+    monitor: str = "loss"
+    mode: str = "min"
+    patience: int = 10
+    min_delta: float = 0.0
+    start_epoch: int = 0
+
+
+class EarlyStopping:
+    """Track metric improvements and decide when training should stop."""
+
+    def __init__(self, config: EarlyStoppingConfig) -> None:
+        if config.mode not in {"min", "max"}:
+            raise ValueError("early_stopping.mode must be 'min' or 'max'.")
+        if config.patience < 1:
+            raise ValueError("early_stopping.patience must be >= 1.")
+
+        self.config = config
+        self.best_value: float | None = None
+        self.best_epoch: int | None = None
+        self.bad_epochs = 0
+
+    def step(self, epoch: int, metrics: dict[str, float]) -> tuple[bool, bool]:
+        if self.config.monitor not in metrics:
+            raise KeyError(
+                f"Metric {self.config.monitor!r} is not available for early stopping."
+            )
+
+        value = float(metrics[self.config.monitor])
+        improved = self._is_improvement(value)
+        if improved:
+            self.best_value = value
+            self.best_epoch = epoch
+            self.bad_epochs = 0
+        elif epoch >= self.config.start_epoch:
+            self.bad_epochs += 1
+
+        should_stop = (
+            epoch >= self.config.start_epoch
+            and self.best_epoch is not None
+            and self.bad_epochs >= self.config.patience
+        )
+        return improved, should_stop
+
+    def _is_improvement(self, value: float) -> bool:
+        if self.best_value is None:
+            return True
+        if self.config.mode == "min":
+            return value < self.best_value - self.config.min_delta
+        return value > self.best_value + self.config.min_delta
 
 
 class OptimizerFactory:
@@ -156,6 +223,7 @@ class CheckpointManager:
         wd_scheduler: Any | None = None,
         ema_scheduler: Any | None = None,
         scaler: Any | None = None,
+        aliases: tuple[str, ...] = (),
     ) -> None:
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
         checkpoint_path = (
@@ -164,22 +232,48 @@ class CheckpointManager:
         checkpoint = {
             "epoch": epoch,
             "model_state": model.state_dict(),
-            "optimizer_state": optimizer.state_dict(),
             "extra_state": extra_state or {},
         }
 
-        if lr_scheduler is not None:
+        if self.config.save_optimizer:
+            checkpoint["optimizer_state"] = optimizer.state_dict()
+        if self.config.save_schedulers and lr_scheduler is not None:
             checkpoint["lr_scheduler_state"] = lr_scheduler.state_dict()
-        if wd_scheduler is not None:
+        if self.config.save_schedulers and wd_scheduler is not None:
             checkpoint["wd_scheduler_state"] = wd_scheduler.state_dict()
-        if ema_scheduler is not None:
+        if self.config.save_schedulers and ema_scheduler is not None:
             checkpoint["ema_scheduler_state"] = ema_scheduler.state_dict()
-        if scaler is not None:
+        if self.config.save_scaler and scaler is not None:
             checkpoint["scaler_state"] = scaler.state_dict()
 
-        torch.save(checkpoint, checkpoint_path)
+        self._atomic_save(checkpoint, checkpoint_path)
         latest_path = self.config.output_dir / f"{self.config.write_tag}_latest.pt"
-        torch.save(checkpoint, latest_path)
+        self._atomic_save(checkpoint, latest_path)
+        for alias in aliases:
+            alias_path = self.config.output_dir / f"{self.config.write_tag}_{alias}.pt"
+            self._atomic_save(checkpoint, alias_path)
+        self._prune_epoch_checkpoints()
+
+    def _atomic_save(self, checkpoint: dict[str, Any], path: Path) -> None:
+        tmp_path = path.with_name(f"{path.name}.tmp")
+        try:
+            torch.save(checkpoint, tmp_path)
+            tmp_path.replace(path)
+        except Exception as exc:
+            tmp_path.unlink(missing_ok=True)
+            raise RuntimeError(f"Failed to save checkpoint at {path}") from exc
+
+    def _prune_epoch_checkpoints(self) -> None:
+        if self.config.keep_last_n is None:
+            return
+        if self.config.keep_last_n < 1:
+            raise ValueError("logging.keep_last_n must be >= 1 when set.")
+
+        pattern = f"{self.config.write_tag}_epoch_*.pt"
+        checkpoints = sorted(self.config.output_dir.glob(pattern))
+        stale_checkpoints = checkpoints[: -self.config.keep_last_n]
+        for checkpoint in stale_checkpoints:
+            checkpoint.unlink(missing_ok=True)
 
     def load(
         self,
@@ -199,7 +293,7 @@ class CheckpointManager:
             raise FileNotFoundError(f"Checkpoint not found at {path}")
 
         checkpoint = torch.load(path, map_location="cpu")
-        model.load_state_dict(checkpoint["model_state"])
+        model.load_state_dict(checkpoint["model_state"], strict=False)
 
         if optimizer is not None and "optimizer_state" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer_state"])
@@ -237,6 +331,7 @@ class IJEPATrainer:
         self.wd_scheduler: Any | None = None
         self.ema_scheduler: EMAScheduler | None = None
         self.scaler: Any | None = None
+        self.early_stopping: EarlyStopping | None = None
         self.use_amp = False
         self.amp_dtype = torch.float16
         self.device: str = "cpu"
@@ -245,7 +340,8 @@ class IJEPATrainer:
     def setup(self) -> None:
         self.device = self.config["runtime"]["device"]
 
-        self.model = self.build_model().to(self.device)
+        self.model = self.build_model()
+        self.model = self.model.to(self.device)
         self.loss_fn = self.build_loss().to(self.device)
         self.train_loader = self.build_dataloader()
 
@@ -272,6 +368,9 @@ class IJEPATrainer:
             read_checkpoint=self.config.get("meta", {}).get("read_checkpoint"),
         )
         self.checkpoints = CheckpointManager(checkpoint_config)
+        self.early_stopping = self._build_early_stopping(
+            self.config.get("early_stopping", {})
+        )
 
         if checkpoint_config.load_checkpoint:
             state = self.checkpoints.load(
@@ -288,6 +387,14 @@ class IJEPATrainer:
         valid_fields = {field.name for field in fields(TrainingConfig)}
         kwargs = {key: value for key, value in config.items() if key in valid_fields}
         return TrainingConfig(**kwargs)
+
+    def _build_early_stopping(self, config: dict[str, Any]) -> EarlyStopping | None:
+        valid_fields = {field.name for field in fields(EarlyStoppingConfig)}
+        kwargs = {key: value for key, value in config.items() if key in valid_fields}
+        early_config = EarlyStoppingConfig(**kwargs)
+        if not early_config.enabled:
+            return None
+        return EarlyStopping(early_config)
 
     def _should_use_amp(self, config: TrainingConfig) -> bool:
         return config.use_amp and self.device.startswith("cuda")
@@ -342,13 +449,20 @@ class IJEPATrainer:
             train_metrics = self.train_epoch(epoch)
             tqdm.write(f"Epoch {epoch}: {train_metrics}")
 
-            should_save = (
+            improved = False
+            should_stop = False
+            if self.early_stopping is not None:
+                improved, should_stop = self.early_stopping.step(epoch, train_metrics)
+
+            should_save_periodic = (
                 self.checkpoints is not None
                 and (epoch + 1) % self.checkpoints.config.save_every_epochs == 0
             )
-            if should_save:
+            should_save_best = self.checkpoints is not None and improved
+            if should_save_periodic or should_save_best:
                 assert self.optimizer is not None
                 assert self.checkpoints is not None
+                aliases = ("best",) if should_save_best else ()
                 self.checkpoints.save(
                     epoch,
                     self.model,
@@ -358,7 +472,18 @@ class IJEPATrainer:
                     wd_scheduler=self.wd_scheduler,
                     ema_scheduler=self.ema_scheduler,
                     scaler=self.scaler,
+                    aliases=aliases,
                 )
+
+            if should_stop:
+                assert self.early_stopping is not None
+                tqdm.write(
+                    "Early stopping at epoch "
+                    f"{epoch}: best {self.early_stopping.config.monitor}="
+                    f"{self.early_stopping.best_value:.6f} at epoch "
+                    f"{self.early_stopping.best_epoch}"
+                )
+                break
 
     def train_epoch(self, epoch: int) -> dict[str, float]:
         assert self.model is not None

@@ -163,6 +163,12 @@ class BlockMaskSampler:
 
         if best_candidate.numel() >= self.config.min_context_patches:
             return best_candidate
+
+        fallback = torch.arange(self.config.num_patches, dtype=torch.long)
+        fallback = fallback[~excluded]
+        if fallback.numel() >= self.config.min_context_patches:
+            return fallback
+
         raise RuntimeError(
             "Unable to sample enough context patches outside target blocks"
         )
@@ -173,10 +179,14 @@ class BlockMaskSampler:
         aspect_ratio: tuple[float, float],
     ) -> tuple[int, int]:
         scale_value = torch.empty(1).uniform_(float(scale[0]), float(scale[1])).item()
-        log_ratio = torch.empty(1).uniform_(
-            math.log(float(aspect_ratio[0])),
-            math.log(float(aspect_ratio[1])),
-        ).item()
+        log_ratio = (
+            torch.empty(1)
+            .uniform_(
+                math.log(float(aspect_ratio[0])),
+                math.log(float(aspect_ratio[1])),
+            )
+            .item()
+        )
         ratio = math.exp(log_ratio)
         target_area = self.config.num_patches * scale_value
 
@@ -184,6 +194,15 @@ class BlockMaskSampler:
         width = round(math.sqrt(target_area / ratio))
         height = min(self.config.grid_size, max(1, height))
         width = min(self.config.grid_size, max(1, width))
+
+        max_area = max(1, min(self.config.num_patches, math.ceil(target_area)))
+        while height * width > max_area:
+            if height >= width and height > 1:
+                height -= 1
+            elif width > 1:
+                width -= 1
+            else:
+                break
         return height, width
 
     def _sample_block_at_random_locations(

@@ -1,95 +1,94 @@
 meta:
   project: ijepa-mini
-  model_name: vit_small_random_imagenet50_200_jepa_original_mask
+  model_name: vit_b16_random_imagenet50_200_jepa
   use_bfloat16: false
   load_checkpoint: false
   read_checkpoint: null
-
 model:
   encoder:
     image_size: 224
     patch_size: 16
     in_channels: 3
-    embed_dim: 384
-    depth: 6
-    num_heads: 6
+    embed_dim: 768
+    depth: 12
+    num_heads: 12
     mlp_ratio: 4.0
     dropout: 0.0
     use_cls_token: false
   predictor:
-    embed_dim: 384
-    predictor_embed_dim: 192
+    embed_dim: 768
+    predictor_embed_dim: 384
     depth: 4
     num_heads: 6
     mlp_ratio: 4.0
     dropout: 0.0
-
 data:
   root_path: data/imagenet50-200
   image_folder: train
   train_folder: train
   val_folder: val
   image_size: 224
-  batch_size: 64
+  batch_size: 16
   num_workers: 6
   pin_memory: true
   drop_last: true
-
 mask:
   image_size: 224
   patch_size: 16
   allow_overlap: false
   num_context_masks: 1
   num_target_masks: 4
-  context_scale: [0.85, 1.0]
-  target_scale: [0.15, 0.2]
-  aspect_ratio: [0.75, 1.5]
-  min_context_patches: 10
-
+  context_scale:
+  - 0.85
+  - 1.0
+  target_scale:
+  - 0.15
+  - 0.2
+  aspect_ratio:
+  - 0.75
+  - 1.5
 optimization:
-  epochs: 40
-  warmup_epochs: 5
-  lr: 3.0e-05
-  start_lr: 3.0e-06
+  epochs: 20
+  warmup_epochs: 3
+  lr: 1.0e-05
+  start_lr: 1.0e-06
   final_lr: 1.0e-06
   weight_decay: 0.04
   final_weight_decay: 0.4
-  ema: [0.996, 1.0]
+  ema:
+  - 0.996
+  - 1.0
   use_amp: true
   amp_dtype: float16
-
 loss:
   name: smooth_l1
   beta: 1.0
   normalize_targets: true
-
 logging:
   folder: outputs
-  run_name: imagenet50-200-vit-small-original-mask-jepa
+  run_name: imagenet50-200-vit-b16-random-jepa
   checkpoint_subdir: checkpoints
-  write_tag: imagenet50-200-vit-small-original-mask-jepa
+  write_tag: imagenet50-200-vit-b16-random-jepa
   save_every_epochs: 2
   save_optimizer: false
   save_schedulers: false
   save_scaler: false
   keep_last_n: 2
-
 evaluation:
   linear_probe:
-    checkpoint_path: outputs/imagenet50-200-vit-small-original-mask-jepa/checkpoints/imagenet50-200-vit-small-original-mask-jepa_latest.pt
+    checkpoint_path: outputs/imagenet50-200-vit-b16-random-jepa/checkpoints/imagenet50-200-vit-b16-random-jepa_latest.pt
     num_classes: 50
     epochs: 20
     lr: 0.05
     weight_decay: 0.0
     batch_size: 512
-    output_dir: outputs/imagenet50-200-vit-small-original-mask-jepa/linear_probe
+    output_dir: outputs/imagenet50-200-vit-b16-random-jepa/linear_probe
   knn:
-    checkpoint_path: outputs/imagenet50-200-vit-small-original-mask-jepa/checkpoints/imagenet50-200-vit-small-original-mask-jepa_latest.pt
+    checkpoint_path: outputs/imagenet50-200-vit-b16-random-jepa/checkpoints/imagenet50-200-vit-b16-random-jepa_latest.pt
     k: 20
     temperature: 0.07
     batch_size: 64
     normalize_features: true
-
 early_stopping:
   enabled: false
   monitor: loss

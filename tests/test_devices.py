@@ -29,9 +29,7 @@ def test_encoder_masked_forward_on_device(device):
     enc = VisionTransformerEncoder(EncoderConfig()).to(device)
     enc.eval()
     x = torch.randn(2, 3, 224, 224, device=device)
-    idx = torch.stack(
-        [torch.randperm(196)[:30] for _ in range(2)]
-    ).to(device)
+    idx = torch.stack([torch.randperm(196)[:30] for _ in range(2)]).to(device)
     out = enc(x, masks=[idx])
     assert out.shape == (2, 30, 192)
     assert out.device.type == device.type

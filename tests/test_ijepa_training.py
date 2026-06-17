@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 
 from src.models.ijepa import build_ijepa
 from src.training.losses import build_loss, normalize_targets
-from src.training.train import OptimizerFactory, TrainingConfig
+from src.training.train import (
+    CheckpointConfig,
+    EarlyStopping,
+    EarlyStoppingConfig,
+    OptimizerFactory,
+    TrainingConfig,
+)
 
 
-def _tiny_model_config() -> dict:
+def _small_model_config() -> dict:
     return {
         "encoder": {
             "image_size": 32,
@@ -26,14 +34,14 @@ def _tiny_model_config() -> dict:
 
 
 def test_ijepa_is_torch_module():
-    model = build_ijepa(_tiny_model_config())
+    model = build_ijepa(_small_model_config())
     assert hasattr(model, "to")
     assert hasattr(model, "state_dict")
 
 
 def test_ijepa_forward_shapes_single_context_mask():
     torch.manual_seed(0)
-    model = build_ijepa(_tiny_model_config())
+    model = build_ijepa(_small_model_config())
     images = torch.randn(2, 3, 32, 32)
     context_masks = [torch.tensor([[0, 1], [1, 2]])]
     target_masks = [torch.tensor([[2, 3], [0, 3]])]
@@ -48,7 +56,7 @@ def test_ijepa_forward_shapes_single_context_mask():
 
 def test_ijepa_forward_shapes_multiple_context_masks():
     torch.manual_seed(1)
-    model = build_ijepa(_tiny_model_config())
+    model = build_ijepa(_small_model_config())
     images = torch.randn(2, 3, 32, 32)
     context_masks = [
         torch.tensor([[0, 1], [1, 2]]),
@@ -83,7 +91,7 @@ def test_normalize_targets_normalizes_last_dimension():
 
 
 def test_optimizer_factory_schedules_per_step():
-    model = build_ijepa(_tiny_model_config())
+    model = build_ijepa(_small_model_config())
     config = TrainingConfig(
         epochs=2,
         warmup_epochs=1,
@@ -104,3 +112,30 @@ def test_optimizer_factory_schedules_per_step():
     wd_scheduler.step()
     assert optimizer.param_groups[0]["lr"] > 0.1
     assert optimizer.param_groups[0]["weight_decay"] == 0.1
+
+
+def test_structured_checkpoint_output_dir_keeps_flat_default():
+    assert CheckpointConfig(folder="outputs").output_dir == Path("outputs")
+    config = CheckpointConfig(
+        folder="outputs",
+        run_name="run-a",
+        checkpoint_subdir="checkpoints",
+    )
+    assert config.output_dir == Path("outputs/run-a/checkpoints")
+
+
+def test_early_stopping_uses_patience_and_min_delta():
+    stopper = EarlyStopping(
+        EarlyStoppingConfig(
+            enabled=True,
+            monitor="loss",
+            mode="min",
+            patience=2,
+            min_delta=0.01,
+            start_epoch=1,
+        )
+    )
+
+    assert stopper.step(0, {"loss": 1.0}) == (True, False)
+    assert stopper.step(1, {"loss": 0.995}) == (False, False)
+    assert stopper.step(2, {"loss": 0.996}) == (False, True)

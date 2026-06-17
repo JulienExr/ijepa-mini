@@ -56,7 +56,7 @@ class PatchEmbedding(nn.Module):
         self.config = config
         assert config.image_size % config.patch_size == 0
         self.grid_size = config.image_size // config.patch_size
-        self.num_patches = self.grid_size ** 2
+        self.num_patches = self.grid_size**2
         self.proj = nn.Conv2d(
             in_channels=config.in_channels,
             out_channels=config.embed_dim,
@@ -75,7 +75,7 @@ class MultiHeadSelfAttention(nn.Module):
         assert config.embed_dim % config.num_heads == 0
         self.num_heads = config.num_heads
         self.head_dim = config.embed_dim // config.num_heads
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
         self.qkv = nn.Linear(config.embed_dim, 3 * config.embed_dim)
         self.proj = nn.Linear(config.embed_dim, config.embed_dim)
         self.attn_drop = nn.Dropout(config.dropout)
@@ -137,7 +137,6 @@ class VisionTransformerEncoder(nn.Module):
         self.register_buffer(
             "pos_embed",
             sincos_2d_pos_embed(config.embed_dim, self.patch_embed.grid_size),
-            persistent=False,
         )
         self.blocks = nn.ModuleList(
             [TransformerEncoderBlock(config) for _ in range(config.depth)]

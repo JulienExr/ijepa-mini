@@ -162,7 +162,7 @@ class IJEPAPredictor(nn.Module):
             tokens = block(tokens)
 
         tokens = self.norm(tokens)
-        target_tokens = tokens[:, context_tokens.size(1):, :]
+        target_tokens = tokens[:, context_tokens.size(1) :, :]
         predictions = self.output_proj(target_tokens)
         return predictions
 

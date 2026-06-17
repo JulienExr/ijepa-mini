@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,15 @@ class DatasetConfig:
     @property
     def image_root(self) -> Path:
         return Path(self.root_path) / self.image_folder
+
+
+def build_dataset_config(config: dict[str, Any] | DatasetConfig) -> DatasetConfig:
+    if isinstance(config, DatasetConfig):
+        return config
+    allowed_keys = {field.name for field in fields(DatasetConfig)}
+    return DatasetConfig(
+        **{key: value for key, value in config.items() if key in allowed_keys}
+    )
 
 
 class ImageFolderDataset(Dataset[Tensor]):
@@ -90,8 +99,7 @@ class IJEPABatchCollator:
 
 def build_transforms(config: dict[str, Any] | DatasetConfig) -> Callable[[Any], Tensor]:
     """Create image transforms for pretraining."""
-    if isinstance(config, dict):
-        config = DatasetConfig(**config)
+    config = build_dataset_config(config)
     if config.image_size <= 0:
         raise ValueError("image_size must be positive")
 
@@ -109,8 +117,7 @@ def build_transforms(config: dict[str, Any] | DatasetConfig) -> Callable[[Any], 
 
 
 def build_dataset(config: dict[str, Any] | DatasetConfig) -> ImageFolderDataset:
-    if isinstance(config, dict):
-        config = DatasetConfig(**config)
+    config = build_dataset_config(config)
     return ImageFolderDataset(
         root=config.image_root,
         transform=build_transforms(config),
@@ -122,8 +129,7 @@ def build_dataloader(
     collate_fn: Callable[[list[Tensor]], Any] | None = None,
 ) -> DataLoader[Any]:
     """Create the pretraining dataloader."""
-    if isinstance(config, dict):
-        config = DatasetConfig(**config)
+    config = build_dataset_config(config)
     if config.batch_size <= 0:
         raise ValueError("batch_size must be positive")
     if config.num_workers < 0:
